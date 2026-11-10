@@ -1,9 +1,25 @@
+-- SPDX-License-Identifier: GPL-3.0-or-later
 --[[
   Name:        SubMerge
   Description: Merge two external language-specific SRT subtitle files.
   Author:      Doineann
   Version:     1.3
-  License:     GPL
+  License:     GPL-3.0-or-later
+
+  Copyright (C) 2026 Doineann
+
+  This program is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
   VLC 3.x Lua extension.
 
@@ -23,7 +39,7 @@ function descriptor()
         shortdesc = "SubMerge",
         description = "Scan, merge and load language-tagged external SRT files.",
         capabilities = { "input-listener" },
-        license = "GPL"
+        license = "GPL-3.0-or-later"
     }
 end
 
@@ -247,18 +263,14 @@ local function is_english(tag)
     return same_lang(tag, "en")
 end
 
--- Returns true when tag looks like the combination "en-nl" produced by a
--- previous merge (two different known languages joined by '-' or '_').
--- This keeps merged output files out of the source dropdowns.
-local function is_merged_tag(tag)
-    local a, b = tag:match("^([%a]+)[-_]([%a]+)$")
-    if not a or not b then return false end
-    local ca, cb = lang_canonical[a], lang_canonical[b]
-    return ca ~= nil and cb ~= nil and ca ~= cb
+-- Splits a merged-output tag such as "en-nl" into its two language tags.
+-- Returns nil when the tag does not have that shape.
+local function merged_tag_parts(tag)
+    return tag:match("^([%a]+)[-_]([%a]+)$")
 end
 
 local function scan_subtitles()
-    subtitle_files = {}
+    local candidates = {}
     local seen = {}
 
     for _, dir in ipairs(get_scan_directories()) do
@@ -270,13 +282,39 @@ local function scan_subtitles()
 
                 local tag = get_language_tag(path)
 
-                if tag and not is_merged_tag(tag) then
-                    subtitle_files[#subtitle_files + 1] = {
+                if tag then
+                    candidates[#candidates + 1] = {
                         path = path,
                         tag = tag
                     }
                 end
             end
+        end
+    end
+
+    -- Languages that actually have a source subtitle file. A merged output
+    -- is named "<stem>.<first>-<second>.srt", so it can be recognised
+    -- without hard-coding any specific language pair: both of its halves
+    -- must exist as source files in their own right.
+    local source_tags = {}
+    for _, sub in ipairs(candidates) do
+        source_tags[lang_canonical[sub.tag] or sub.tag] = true
+    end
+
+    subtitle_files = {}
+
+    for _, sub in ipairs(candidates) do
+        local a, b = merged_tag_parts(sub.tag)
+        local canonical_a = a and (lang_canonical[a] or a)
+        local canonical_b = b and (lang_canonical[b] or b)
+
+        local is_merged = canonical_a ~= nil and canonical_b ~= nil and
+                          canonical_a ~= canonical_b and
+                          source_tags[canonical_a] == true and
+                          source_tags[canonical_b] == true
+
+        if not is_merged then
+            subtitle_files[#subtitle_files + 1] = sub
         end
     end
 

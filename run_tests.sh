@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Runs the full SubMerge test suite.
 # Usage: ./run_tests.sh
 
