@@ -7,6 +7,8 @@ local tests = {
     "test_dropdowns.lua",
     "test_merge_logic.lua",
     "test_merge_output.lua",
+    "test_primary_selection.lua",
+    "test_overwrite.lua",
     "test_edge_cases.lua",
 }
 

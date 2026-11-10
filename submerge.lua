@@ -27,6 +27,20 @@ function descriptor()
     }
 end
 
+-- Extension state. Declared before the lifecycle functions so that
+-- deactivate() closes over the real locals rather than globals.
+local dlg = nil
+local subtitle_files = {}
+local video_path = nil
+local video_dir = nil
+local video_stem = nil
+local status_label = nil
+
+-- Dropdown widget references. In VLC 3.x, get_value() is a widget method,
+-- not a dialog method.
+local first_dd_widget = nil
+local second_dd_widget = nil
+
 function activate()
     refresh_dialog()
 end
@@ -39,18 +53,6 @@ function deactivate()
 
     status_label = nil
 end
-
-local dlg = nil
-local subtitle_files = {}
-local video_path = nil
-local video_dir = nil
-local video_stem = nil
-local status_label = nil
-
--- Widget references for reading dropdown values (get_value is a widget method,
--- not a dialog method, in VLC 3.x Lua).
-local first_dd_widget = nil
-local second_dd_widget = nil
 
 local function is_windows()
     return package.config:sub(1, 1) == "\\"
@@ -144,9 +146,9 @@ local function list_srt_files(dir)
     for line in pipe:lines() do
         line = line:gsub("[\r\n]+$", "")
         if line ~= "" then
+            -- Windows `dir /b` prints bare filenames; `find` already prints
+            -- paths relative to (or including) the scanned directory.
             if is_windows() and not line:match("^[/\\]?[%a]:[/\\]") then
-                line = path_join(dir, line)
-            elseif not is_windows() and line:sub(1, 1) ~= "/" then
                 line = path_join(dir, line)
             end
             results[#results + 1] = line
@@ -210,20 +212,49 @@ local function get_language_tag(path)
     if not tag then return nil end
 
     local rest = tail:sub(#tag + 1)
-    local region = rest:match("^[-_]([%a][%a])")
 
+    -- Optional region suffix, e.g. "en-US" or "en_US".
+    local region = rest:match("^[-_]([%a][%a])")
     if region then
         tag = tag .. "-" .. region
         rest = rest:sub(4)
-    elseif rest ~= "" and not rest:match("^[%.%-_]") then
-        return nil
     end
 
+    -- Anything left must be a separator-led suffix (e.g. ".forced").
     if rest ~= "" and not rest:match("^[%.%-_][%w%.%-_]*$") then
         return nil
     end
 
     return tag:lower()
+end
+
+-- Common language code aliases (3-letter and 2-letter forms).
+-- canonical: tag -> canonical language id
+local lang_canonical = {
+    eng = "en", en = "en",
+    dut = "nl", nl = "nl",
+    ger = "de", de = "de",
+}
+
+-- Returns true if tag a and tag b refer to the same language.
+local function same_lang(a, b)
+    if a == b then return true end
+    return (lang_canonical[a] or a) == (lang_canonical[b] or b)
+end
+
+-- Returns true when tag is the English language in any accepted form.
+local function is_english(tag)
+    return same_lang(tag, "en")
+end
+
+-- Returns true when tag looks like the combination "en-nl" produced by a
+-- previous merge (two different known languages joined by '-' or '_').
+-- This keeps merged output files out of the source dropdowns.
+local function is_merged_tag(tag)
+    local a, b = tag:match("^([%a]+)[-_]([%a]+)$")
+    if not a or not b then return false end
+    local ca, cb = lang_canonical[a], lang_canonical[b]
+    return ca ~= nil and cb ~= nil and ca ~= cb
 end
 
 local function scan_subtitles()
@@ -239,11 +270,10 @@ local function scan_subtitles()
 
                 local tag = get_language_tag(path)
 
-                if tag then
+                if tag and not is_merged_tag(tag) then
                     subtitle_files[#subtitle_files + 1] = {
                         path = path,
-                        tag = tag,
-                        label = tag
+                        tag = tag
                     }
                 end
             end
@@ -251,15 +281,11 @@ local function scan_subtitles()
     end
 
     table.sort(subtitle_files, function(a, b)
-        -- English first
-        local a_eng = (a.tag == "eng" or a.tag == "en")
-        local b_eng = (b.tag == "eng" or b.tag == "en")
-        if a_eng and not b_eng then return true end
-        if not a_eng and b_eng then return false end
-        if a.tag == b.tag then
-            return a.path:lower() < b.path:lower()
-        end
-        return a.tag < b.tag
+        -- English first; otherwise sort by tag then path.
+        local a_eng, b_eng = is_english(a.tag), is_english(b.tag)
+        if a_eng ~= b_eng then return a_eng end
+        if a.tag ~= b.tag then return a.tag < b.tag end
+        return a.path:lower() < b.path:lower()
     end)
 end
 
@@ -368,13 +394,11 @@ local function merge_subtitles(first, second, output_path)
     -- the output file.
     local order = 0
     for _, cue in ipairs(first_cues) do
-        cue.yellow = false
         order = order + 1
         cue.order = order
         cues[#cues + 1] = cue
     end
     for _, cue in ipairs(second_cues) do
-        cue.yellow = true
         order = order + 1
         cue.order = order
         cues[#cues + 1] = cue
@@ -402,118 +426,59 @@ local function merge_subtitles(first, second, output_path)
     return true
 end
 
-local function set_status(message, color)
-    if status_label then
-        if color then
-            status_label:set_text('<font color="' .. color .. '">' .. message .. '</font>')
-        else
-            status_label:set_text(message)
-        end
-    elseif dlg then
-        status_label = dlg:add_label(message, 1, 100, 3, 1)
-    end
-end
-
 -- One-line status log at the bottom of the dialog.
 -- Prefixes every message with "STATUS: ". VLC 3.x dropdowns don't expose
 -- change callbacks, so we log merge/refresh/error events here. VLC 3.x
 -- dialogs do not have a dedicated statusbar component, so a label at the
 -- bottom of the dialog is used instead.
 local function log(message, color)
-    if status_label then
-        if color then
-            status_label:set_text("STATUS: <font color=\"" .. color .. "\">" .. message .. "</font>")
-        else
-            status_label:set_text("STATUS: " .. message)
-        end
+    if not status_label then return end
+
+    if color then
+        status_label:set_text(
+            'STATUS: <font color="' .. color .. '">' .. message .. '</font>'
+        )
+    else
+        status_label:set_text("STATUS: " .. message)
     end
 end
 
--- Common language code aliases (3-letter and 2-letter forms).
-local lang_aliases = {
-    eng = {"eng", "en"},
-    en  = {"eng", "en"},
-    dut = {"dut", "nl"},
-    nl  = {"dut", "nl"},
-    ger = {"ger", "de"},
-    de  = {"ger", "de"},
-}
-
--- Returns true if tag a and tag b refer to the same language.
-local function same_lang(a, b)
-    if a == b then return true end
-    for _, ta in ipairs(lang_aliases[a] or {a}) do
-        for _, tb in ipairs(lang_aliases[b] or {b}) do
-            if ta == tb then return true end
-        end
+-- Reads the selected entry id from a dropdown widget, or nil.
+--
+-- Each dropdown entry MUST be added with a unique id (its index in
+-- subtitle_files). VLC's Qt SyncSelection() marks entries selected by
+-- comparing ids; with duplicate ids every entry is marked selected and
+-- get_value() always returns the first one. get_value() returns (id, text).
+local function dropdown_value(widget)
+    if not widget or type(widget.get_value) ~= "function" then
+        return nil
     end
-    return false
+
+    local id = widget:get_value()
+    if type(id) == "number" and id >= 1 then
+        return id
+    end
+    return nil
 end
 
--- Returns the preferred default language tag order (English first for display
--- in the first dropdown only — does NOT force auto-selection during merge).
-local function preferred_order()
-    local order = {"eng", "en", "dut", "nl", "ger", "de"}
-    local result = {}
-    for _, preferred in ipairs(order) do
-        for _, sub in ipairs(subtitle_files) do
-            if same_lang(sub.tag, preferred) then
-                table.insert(result, sub)
-            end
-        end
-    end
-    -- Append any remaining languages not in the preferred list.
-    for _, sub in ipairs(subtitle_files) do
-        local found = false
-        for _, r in ipairs(result) do
-            if r.path == sub.path then found = true; break end
-        end
-        if not found then table.insert(result, sub) end
-    end
-    return result
+-- Returns the subtitle entry with the given dropdown id (1-based), or nil.
+local function find_by_id(id)
+    if type(id) ~= "number" or id < 1 then return nil end
+    return subtitle_files[id]
 end
 
--- VLC dropdown widgets expose get_value() as a widget method (not a dialog
--- method). Store widget references and call :get_value() on them.
+-- Resolves the two subtitle files chosen in the dropdowns, falling back to
+-- sensible defaults (first file for primary, first different language for
+-- secondary) when nothing (or something invalid) is selected.
 local function resolve_selected()
-    local first_label = nil
-    local second_label = nil
+    local first = find_by_id(dropdown_value(first_dd_widget))
+                  or subtitle_files[1]
 
-    -- Try to read dropdown values via widget:get_value()
-    if first_dd_widget and type(first_dd_widget.get_value) == "function" then
-        first_label = first_dd_widget:get_value()
-    end
-    if second_dd_widget and type(second_dd_widget.get_value) == "function" then
-        second_label = second_dd_widget:get_value()
-    end
+    if not first then return nil, nil end
 
-    local first, second
+    local second = find_by_id(dropdown_value(second_dd_widget))
 
-    -- Resolve first: use selected label, or default to subtitle_files[1].
-    if type(first_label) == "string" and first_label ~= "" then
-        for _, sub in ipairs(subtitle_files) do
-            if sub.label == first_label then
-                first = sub
-                break
-            end
-        end
-    end
-    if not first then
-        first = subtitle_files[1]
-    end
-
-    -- Resolve second: use selected label, or default to first subtitle with a
-    -- different language than the first.
-    if type(second_label) == "string" and second_label ~= "" then
-        for _, sub in ipairs(subtitle_files) do
-            if sub.label == second_label then
-                second = sub
-                break
-            end
-        end
-    end
     if not second then
-        -- Pick first file with a different language than 'first'.
         for _, sub in ipairs(subtitle_files) do
             if not same_lang(sub.tag, first.tag) then
                 second = sub
@@ -521,13 +486,14 @@ local function resolve_selected()
             end
         end
     end
-    -- Fallback: if all tags are the same language, just pick the second file.
+
+    -- If every file is the same language, fall back to the second file.
     if not second and #subtitle_files >= 2 then
         second = subtitle_files[2]
     end
 
-    -- Safety: never merge a file with itself.
-    if second and first and second.path == first.path then
+    -- Never merge a file with itself.
+    if second and second.path == first.path then
         second = nil
         for _, sub in ipairs(subtitle_files) do
             if sub.path ~= first.path then
@@ -565,27 +531,42 @@ local function do_merge(first, second, output_path, output_name)
 
     if loaded then
         log("merged and loaded: " .. output_name, "#00CC00")
+
+        -- Close the extension once the merged subtitle is active. This is
+        -- asynchronous in VLC, so the rest of this function still runs.
+        if vlc.deactivate then
+            vlc.deactivate()
+        end
     else
         log("created " .. output_name ..
            " but VLC could not load it automatically.", "#00CC00")
     end
 end
 
--- Asks the user whether to overwrite an existing merged file.
+-- Asks the user whether to overwrite or skip an existing merged file.
+-- VLC 3 allows only one dialog per extension, so the main dialog is
+-- replaced by the prompt instead of opening a second window.
 local function confirm_overwrite(first, second, output_path, output_name)
-    local ov_dlg = vlc.dialog("File Already Exists")
+    if dlg then
+        dlg:delete()
+    end
 
-    ov_dlg:add_label("The merged file already exists:", 1, 1, 3, 1)
-    ov_dlg:add_label(output_path, 1, 2, 3, 1)
-    ov_dlg:add_label("Overwrite it?", 1, 3, 3, 1)
+    dlg = vlc.dialog("File Already Exists")
+    status_label = nil
 
-    ov_dlg:add_button("Overwrite", function()
-        ov_dlg:delete()
+    dlg:add_label("The merged file already exists:", 1, 1, 3, 1)
+    dlg:add_label(output_path, 1, 2, 3, 1)
+    dlg:add_label("Overwrite it or skip this merge?", 1, 3, 3, 1)
+
+    dlg:add_button("Overwrite", function()
+        -- Restore the main dialog first so the merge result is logged there.
+        refresh_dialog()
         do_merge(first, second, output_path, output_name)
     end, 1, 4, 1, 1)
-    ov_dlg:add_button("Cancel", function()
-        ov_dlg:delete()
-        log("merge cancelled: file already exists", "#FF6666")
+
+    dlg:add_button("Skip", function()
+        refresh_dialog()
+        log("merge skipped: file already exists", "#FF6666")
     end, 2, 4, 1, 1)
 end
 
@@ -603,8 +584,10 @@ local function merge_selected()
             return
         end
 
-        if first.path == second.path then
-            log("select two different subtitle files.", "#FF6666")
+        if not first.tag or first.tag == "" or
+           not second.tag or second.tag == "" then
+            log("error: could not read language tags from subtitle files.",
+                "#FF6666")
             return
         end
 
@@ -613,20 +596,14 @@ local function merge_selected()
             return
         end
 
-        if not first.tag or first.tag == "" or not second.tag or second.tag == "" then
-            log("error: could not read language tags from subtitle files.", "#FF6666")
-            return
-        end
-
         local output_name = video_stem .. "." ..
                             first.tag .. "-" .. second.tag .. ".srt"
-
         local output_path = path_join(video_dir, output_name)
 
-        -- Check if merged file already exists; if so, ask user before overwriting.
-        local f = io.open(output_path, "r")
-        if f then
-            f:close()
+        -- Ask before overwriting an existing merged file.
+        local existing = io.open(output_path, "r")
+        if existing then
+            existing:close()
             confirm_overwrite(first, second, output_path, output_name)
         else
             do_merge(first, second, output_path, output_name)
@@ -648,69 +625,74 @@ function refresh_dialog()
     first_dd_widget = nil
     second_dd_widget = nil
 
+    local row = 1
+
+    local function add_label(text, width)
+        local widget = dlg:add_label(text, 1, row, width or 3, 1)
+        row = row + 1
+        return widget
+    end
+
+    local function add_refresh_button()
+        dlg:add_button("Refresh", refresh_dialog, 1, row, 1, 1)
+        row = row + 1
+    end
+
     if not get_current_video() then
-        dlg:add_label("No local video is currently playing.", 1, 1, 3, 1)
-        dlg:add_label("Open a local video file, then click Refresh.", 1, 2, 3, 1)
-        dlg:add_button("Refresh", refresh_dialog, 1, 3, 1, 1)
-        status_label = dlg:add_label("STATUS: refreshed: no video playing", 1, 4, 3, 1)
+        add_label("No local video is currently playing.")
+        add_label("Open a local video file, then click Refresh.")
+        add_refresh_button()
+        status_label = add_label("STATUS: refreshed: no video playing")
         return
     end
 
     scan_subtitles()
 
-    dlg:add_label("Video: " .. basename(video_path), 1, 1, 3, 1)
+    add_label("Video: " .. basename(video_path))
 
     if #subtitle_files < 2 then
-        dlg:add_label("Number of subtitle files found: " .. #subtitle_files, 1, 2, 3, 1)
-        dlg:add_label("Select 2 files to merge! (NOTE: original files will not be modified)", 1, 3, 3, 1)
-        dlg:add_label("Need at least 2 matching SRT files to merge.", 1, 4, 3, 1)
-        dlg:add_label("Expected naming: video-name.<language>.srt", 1, 5, 3, 1)
-        dlg:add_label("Example: movie.eng.srt and movie.fra.srt", 1, 6, 3, 1)
-        dlg:add_button("Refresh", refresh_dialog, 1, 7, 1, 1)
-        status_label = dlg:add_label("STATUS: refreshed: " .. #subtitle_files .. " subtitle file(s) found", 1, 8, 3, 1)
+        add_label("Number of subtitle files found: " .. #subtitle_files)
+        add_label("Select 2 files to merge! (NOTE: original files will not be modified)")
+        add_label("Need at least 2 matching SRT files to merge.")
+        add_label("Expected naming: video-name.<language>.srt")
+        add_label("Example: movie.eng.srt and movie.fra.srt")
+        add_refresh_button()
+        status_label = add_label(
+            "STATUS: refreshed: " .. #subtitle_files ..
+            " subtitle file(s) found"
+        )
         return
     end
 
-    local row = 2
-
-    dlg:add_label("Number of subtitle files found: " .. #subtitle_files, 1, row, 3, 1)
-    row = row + 1
-
-    dlg:add_label("Select 2 files to merge! (NOTE: original files will not be modified)", 1, row, 3, 1)
-    row = row + 1
+    add_label("Number of subtitle files found: " .. #subtitle_files)
+    add_label("Select 2 files to merge! (NOTE: original files will not be modified)")
 
     -- Stacked vertically: label, dropdown, label, dropdown.
-    dlg:add_label("First language:", 1, row, 4, 1)
-    row = row + 1
-
-    local first_dd = dlg:add_dropdown("first_sub", 1, row, 4, 1)
-    first_dd_widget = first_dd
-    for _, sub in ipairs(subtitle_files) do
-        first_dd:add_value(sub.label)
+    -- The second argument is the entry id, which must be unique: VLC's Qt
+    -- UI matches selections by id.
+    add_label("First language:", 4)
+    first_dd_widget = dlg:add_dropdown("first_sub", 1, row, 4, 1)
+    for i, sub in ipairs(subtitle_files) do
+        first_dd_widget:add_value(sub.tag, i)
     end
     row = row + 1
 
-    dlg:add_label("Second language (yellow)", 1, row, 4, 1)
-    row = row + 1
-
-    local second_dd = dlg:add_dropdown("second_sub", 1, row, 4, 1)
-    second_dd_widget = second_dd
+    add_label("Second language (yellow)", 4)
+    second_dd_widget = dlg:add_dropdown("second_sub", 1, row, 4, 1)
     for i = #subtitle_files, 1, -1 do
-        second_dd:add_value(subtitle_files[i].label)
+        second_dd_widget:add_value(subtitle_files[i].tag, i)
     end
     row = row + 1
 
-    -- Note between dropdowns and Merge button.
-    dlg:add_label("(note: the original files will not be harmed!)", 1, row, 3, 1)
-    row = row + 1
+    add_label("(note: the original files will not be harmed!)")
 
     dlg:add_button("Merge and load", merge_selected, 1, row, 2, 1)
     dlg:add_button("Refresh", refresh_dialog, 3, row, 2, 1)
     row = row + 1
 
-    status_label = dlg:add_label(
+    status_label = add_label(
         "STATUS: refreshed: " .. #subtitle_files .. " subtitle file(s) found",
-        1, row, 4, 1
+        4
     )
 end
 
