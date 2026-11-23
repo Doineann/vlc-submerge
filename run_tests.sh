@@ -13,4 +13,4 @@ if ! command -v luajit >/dev/null 2>&1; then
     exit 1
 fi
 
-exec luajit test/test_runner.lua
+exec luajit tests/test_runner.lua
