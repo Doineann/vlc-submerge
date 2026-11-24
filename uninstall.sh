@@ -6,33 +6,26 @@ echo "VLC 3 - SubMerge Extension Uninstaller"
 echo "======================================"
 echo
 
-OS="$(uname -s)"
-TARGET=""
-
-case "$OS" in
+case "$(uname -s)" in
     Linux)
-        XDG_DIR="${XDG_DATA_HOME:-$HOME/.local/share}"
-
         CANDIDATES=(
-            "$XDG_DIR/vlc/lua/extensions"
+            "${XDG_DATA_HOME:-$HOME/.local/share}/vlc/lua/extensions"
             "$HOME/.vlc/lua/extensions"
         )
         ;;
-
     Darwin)
         CANDIDATES=(
             "$HOME/Library/Application Support/org.videolan.vlc/lua/extensions"
             "$HOME/.vlc/lua/extensions"
         )
         ;;
-
     *)
-        echo "ERROR: Unsupported operating system: $OS"
+        echo "ERROR: Unsupported operating system: $(uname -s)"
         exit 1
         ;;
 esac
 
-# Find the first existing extensions directory.
+TARGET=""
 for DIR in "${CANDIDATES[@]}"; do
     if [[ -d "$DIR" ]]; then
         TARGET="$DIR"
@@ -51,7 +44,6 @@ if [[ -z "$TARGET" ]]; then
 fi
 
 EXTENSION="$TARGET/submerge.lua"
-
 if [[ ! -f "$EXTENSION" ]]; then
     echo "Extension is not installed."
     exit 0
@@ -68,5 +60,3 @@ echo "SUCCESS: Extension uninstalled!"
 echo "Removed: $EXTENSION"
 echo
 echo "Restart VLC if it is currently running."
-
-exit 0

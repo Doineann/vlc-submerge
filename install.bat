@@ -1,14 +1,15 @@
-
 @echo off
 @rem SPDX-License-Identifier: GPL-3.0-or-later
 setlocal
 
 set "SCRIPT_DIR=%~dp0"
 set "SOURCE=%SCRIPT_DIR%submerge.lua"
-set "TARGET=%APPDATA%\vlc\lua\extensions"
+set "ROOT=%APPDATA%\vlc"
+set "TARGET=%ROOT%\lua\extensions"
+set "EXTENSION=%TARGET%\submerge.lua"
 
 echo.
-echo VLC 3 - Submerge Extension Installer
+echo VLC 3 - SubMerge Extension Installer
 echo =====================================
 echo.
 
@@ -17,17 +18,25 @@ if not exist "%SOURCE%" (
     goto :error
 )
 
-if not exist "%TARGET%\" (
-    echo ERROR: VLC extensions directory not found:
-    echo %TARGET%
+if not exist "%ROOT%\" (
+    echo ERROR: VLC data directory not found:
+    echo %ROOT%
     echo.
     echo Please install VLC 3 and run VLC at least once.
     goto :error
 )
 
-echo Installing submerge.lua...
-copy /Y "%SOURCE%" "%TARGET%\submerge.lua" >nul
+if not exist "%TARGET%\" (
+    mkdir "%TARGET%"
+    if errorlevel 1 (
+        echo ERROR: Failed to create extensions directory:
+        echo %TARGET%
+        goto :error
+    )
+)
 
+echo Installing submerge.lua...
+copy /Y "%SOURCE%" "%EXTENSION%" >nul
 if errorlevel 1 (
     echo ERROR: Failed to copy extension.
     goto :error
@@ -35,7 +44,7 @@ if errorlevel 1 (
 
 echo.
 echo SUCCESS: Extension installed!
-echo Location: %TARGET%\submerge.lua
+echo Location: %EXTENSION%
 echo.
 echo Restart VLC to load the extension.
 goto :end
