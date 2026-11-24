@@ -160,14 +160,14 @@ local function list_srt_files(dir)
     if not pipe then return results end
 
     for line in pipe:lines() do
-        line = line:gsub("[\r\n]+$", "")
-        if line ~= "" then
+        local entry = line:gsub("[\r\n]+$", "")
+        if entry ~= "" then
             -- Windows `dir /b` prints bare filenames; `find` already prints
             -- paths relative to (or including) the scanned directory.
-            if is_windows() and not line:match("^[/\\]?[%a]:[/\\]") then
-                line = path_join(dir, line)
+            if is_windows() and not entry:match("^[/\\]?[%a]:[/\\]") then
+                entry = path_join(dir, entry)
             end
-            results[#results + 1] = line
+            results[#results + 1] = entry
         end
     end
 
